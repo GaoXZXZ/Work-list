@@ -1,6 +1,6 @@
 import { empty, addTask, changeTask, logProgress, changeNote, merge, view, canMove } from './model.mjs';
-import { openStorage, read, update, makePassword, checkPassword, loadCloud, saveCloud, normalizeRepo, connect } from './storage.mjs';
-import { day, movedDay, timezone } from './reports.mjs';
+import { openStorage, read, update, makePassword, checkPassword, loadDeviceConfig, saveDeviceConfig, normalizeRepo, connect } from './storage.mjs';
+import { day, movedDay, timezone, deepseekModels, defaultDeepseekModel } from './reports.mjs';
 import { initReports } from './report-ui.mjs';
 
 const icons = {
@@ -41,10 +41,10 @@ const monthLabel = value => value.slice(0, 4) + ' 年 ' + Number(value.slice(5))
 const filterText = value => filters.find(filter => filter[0] === value)?.[1] || monthLabel(value);
 const laterFirst = (a, b) => b.updated.localeCompare(a.updated) || a.id.localeCompare(b.id);
 const cloudRetry = 45_000;
-let db, password, channel, cloud, cloudClient, cloudTimer, syncRunning = false, syncAgain = false;
+let db, password, channel, cloud, deepseek, cloudClient, cloudTimer, syncRunning = false, syncAgain = false;
 let state = empty(), tasks = new Map(), activeStatus = 'active', filter = 'all', query = '';
 let selected = null, mobileDetail = false, dragId = null, toastTimer;
-const localWidget = !demo && location.hostname === '127.0.0.1';
+const localWorkbench = !demo && location.hostname === '127.0.0.1';
 let widgetEnabled = false, lastWidgetPreview, widgetQueue = Promise.resolve();
 let lastSync = '', syncMessage = '', cloudEpoch = 0, ready = false;
 
@@ -94,8 +94,10 @@ async function syncNow() {
   syncRunning = true;
   try {
     showSync('正在同步…');
-    cloudClient ||= await connect(config);
-    const run = () => cloudClient?.sync(async remote => {
+    const client = cloudClient || await connect(config);
+    if (!isCurrent()) return;
+    cloudClient = client;
+    const run = () => client.sync(async remote => {
       let changed = false;
       const result = await update(db, 'state', previous => {
         const local = previous || empty();
@@ -118,7 +120,6 @@ async function syncNow() {
   } catch (error) {
     if (isCurrent()) showSync(error instanceof TypeError ? '连接失败，已保存在本机' : error.message, 'error');
   } finally {
-    if (!isCurrent()) cloudClient = null;
     syncRunning = false;
     queueSync(syncAgain ? 450 : cloudRetry);
     syncAgain = false;
@@ -126,7 +127,7 @@ async function syncNow() {
 }
 
 async function refreshCloud() {
-  cloud = await loadCloud(db);
+  cloud = await loadDeviceConfig(db, 'cloud');
   cloudEpoch++;
   cloudClient = null;
   lastSync = '';
@@ -319,7 +320,7 @@ function render() {
   if (widgetEnabled) sendWidgetPreview().catch(() => {});
 }
 
-const reports = initReports({ getTasks: () => tasks, today, notify });
+const reports = initReports({ getTasks: () => tasks, getDeepseek: () => deepseek, today, notify });
 
 const dialog = $('#dialog');
 const dialogContent = $('#dialog-content');
@@ -546,8 +547,44 @@ function settings() {
       ${action(cloud ? '更新 GitHub 连接' : '连接 GitHub 私有仓库', 'cloud-setup', 'settings')}
       ${cloud ? action('断开当前设备的同步', 'disconnect') : ''}
       ${action(password ? '更换本机操作密码' : '设置本机操作密码', 'password', 'edit')}
+      ${localWorkbench ? action(deepseek ? 'DeepSeek 设置 · ' + deepseekModels[deepseek.model] : 'DeepSeek 设置', 'deepseek', 'sparkles') : ''}
     </div>
-    <p class="modal-description">配置后，打开应用、保存修改与恢复联网时会自动同步。在另一台设备上连接同一仓库，并使用相同的云同步口令。</p>`);
+    <p class="modal-description">每台设备连接一次即可。打开应用、回到前台、保存修改与恢复联网时会自动同步。两端使用同一仓库和云同步口令。</p>`);
+}
+
+async function refreshDeepseek() {
+  if (localWorkbench) deepseek = await loadDeviceConfig(db, 'deepseek').catch(() => null);
+}
+
+function deepseekSetup() {
+  if (!localWorkbench) return;
+  form({
+    title: 'DeepSeek 设置',
+    description: '密钥加密保存在本机。设置后，工作报表会使用所选模型。' + (deepseek ? '留空可继续使用已保存的密钥。' : ''),
+    fields: field('DeepSeek API Key', 'apiKey', { type: 'password', optional: Boolean(deepseek), maxlength: 512 }) +
+      field('撰写模型', 'model', { choices: Object.entries(deepseekModels), initial: deepseek?.model || defaultDeepseekModel }),
+    submitLabel: '验证并保存',
+    submit: async values => {
+      const apiKey = values.apiKey.trim() || deepseek?.apiKey;
+      const model = values.model;
+      if (!apiKey || !/^[!-~]{8,512}$/.test(apiKey)) throw Error('请输入有效的 DeepSeek API Key。');
+      if (!Object.hasOwn(deepseekModels, model)) throw Error('请选择支持的 DeepSeek 模型。');
+      const response = await fetch('./api/report-ai/verify', {
+        method: 'POST', cache: 'no-store', redirect: 'error',
+        headers: { Authorization: 'Bearer ' + apiKey, 'X-Work-List-Model': model },
+      });
+      if (!response.headers.get('Content-Type')?.includes('application/json')) {
+        throw Error('请重启本机 Work List 服务，以启用界面配置。');
+      }
+      const result = await response.json();
+      if (!response.ok || result.verified !== true) throw Error(result.error || '未能验证 DeepSeek API Key，请重试。');
+      const config = { apiKey, model };
+      await saveDeviceConfig(db, 'deepseek', config);
+      deepseek = config;
+      broadcast('deepseek');
+      notify('DeepSeek 已配置 · ' + deepseekModels[model]);
+    },
+  });
 }
 
 function cloudSetup() {
@@ -567,7 +604,7 @@ function cloudSetup() {
       if (!config.token) throw Error('请输入 GitHub 访问令牌');
       const client = await connect(config);
       await client.sync(remote => remote, undefined, true);
-      await saveCloud(db, config);
+      await saveDeviceConfig(db, 'cloud', config);
       await refreshCloud();
       broadcast('cloud');
       notify('已启用自动云同步');
@@ -607,7 +644,7 @@ function disconnect() {
     title: '断开当前设备的同步', description: '本机与 GitHub 仓库中的现有记录都会保留。',
     submitLabel: '断开同步',
     submit: async () => {
-      await saveCloud(db, null);
+      await saveDeviceConfig(db, 'cloud', null);
       await refreshCloud();
       broadcast('cloud');
       notify('已断开云同步');
@@ -616,7 +653,7 @@ function disconnect() {
 }
 
 async function checkDesktopWidget() {
-  if (!localWidget) return;
+  if (!localWorkbench) return;
   try {
     const response = await fetch('./api/desktop-widget', { cache: 'no-store' });
     if (!response.ok) return;
@@ -720,6 +757,7 @@ function handleAction(event) {
     return settings();
   }
   if (key === 'cloud-setup') return cloudSetup();
+  if (key === 'deepseek') return deepseekSetup();
   if (key === 'password') return passwordEditor();
   if (key === 'disconnect') return disconnect();
   const task = tasks.get(id);
@@ -788,12 +826,16 @@ function wire() {
   document.addEventListener('dragend', clearDrag);
   window.addEventListener('online', () => queueSync(0));
   window.addEventListener('offline', () => queueSync());
-  document.addEventListener('visibilitychange', async () => {
-    if (!document.hidden && db) {
-      renderIfChanged(await read(db, 'state') || empty());
-      queueSync(0);
-      if (!widgetEnabled) checkDesktopWidget();
-    }
+  const resume = () => {
+    if (document.hidden || !ready || !db) return;
+    queueSync(0);
+    read(db, 'state').then(saved => renderIfChanged(saved || empty())).catch(console.warn);
+    if (!widgetEnabled) checkDesktopWidget();
+  };
+  document.addEventListener('visibilitychange', resume);
+  window.addEventListener('focus', resume);
+  window.addEventListener('pageshow', event => {
+    if (event.persisted) resume();
   });
 }
 
@@ -826,11 +868,13 @@ async function start() {
     db = await openStorage();
     state = await read(db, 'state') || empty();
     password = await read(db, 'password');
+    await refreshDeepseek();
     if ('BroadcastChannel' in window) {
       channel = new BroadcastChannel('work-journal-v1');
       channel.onmessage = async ({ data }) => {
         if (data === 'cloud') await refreshCloud();
         if (data === 'password') password = await read(db, 'password');
+        if (data === 'deepseek') await refreshDeepseek();
         if (data === 'local' || data === 'remote') renderIfChanged(await read(db, 'state') || empty());
       };
     }

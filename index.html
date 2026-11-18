@@ -132,7 +132,8 @@
     <form id="report-ai-form">
       <p class="modal-description">请先检查素材。点击「发送并生成」后，以下正文会发送给 DeepSeek，可以先删除项目名、金额等敏感内容。</p>
       <label class="field"><span>发送素材</span><textarea id="report-ai-material" class="report-text" rows="10" required spellcheck="false"></textarea></label>
-      <label class="field"><span>AI 访问口令</span><input id="report-ai-code" type="password" autocomplete="off" maxlength="512" required></label>
+      <p id="report-ai-model" class="modal-description" hidden></p>
+      <label id="report-ai-code-field" class="field"><span>AI 访问口令</span><input id="report-ai-code" type="password" autocomplete="off" maxlength="512" required></label>
       <p id="report-ai-status" class="form-error" role="status" hidden></p>
       <div class="modal-footer"><button id="report-ai-generate" type="submit" class="button primary">发送并生成</button></div>
     </form>

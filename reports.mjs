@@ -1,6 +1,11 @@
 export const reportNames = { week: '周报', month: '月报', year: '年报' };
 export const reportUnits = { week: '周', month: '月', year: '年' };
 export const reportMaterialLimit = 100_000;
+export const deepseekModels = {
+  'deepseek-flash': 'DeepSeek Flash',
+  'deepseek-v4-pro': 'DeepSeek V4 Pro',
+};
+export const defaultDeepseekModel = 'deepseek-flash';
 export const timezone = 'Asia/Shanghai';
 
 const calendarDay = new Intl.DateTimeFormat('sv-SE', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' });

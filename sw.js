@@ -1,4 +1,4 @@
-const cacheName = 'work-journal-shell-3';
+const cacheName = 'work-journal-shell-4';
 const appFiles = [
   './', './index.html', './styles.css', './app.mjs', './model.mjs', './storage.mjs',
   './reports.mjs', './report-ui.mjs',

@@ -86,15 +86,21 @@ export function update(db, key, mutate) {
   });
 }
 
-export async function saveCloud(db, config) {
-  const candidate = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-  const key = await update(db, 'device-key', old => old || candidate);
-  const box = config ? await seal(key, config) : null;
-  await update(db, 'cloud', () => box);
+export async function saveDeviceConfig(db, name, config) {
+  let box = null;
+  if (config) {
+    let key = await read(db, 'device-key');
+    if (!key) {
+      const candidate = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      key = await update(db, 'device-key', old => old || candidate);
+    }
+    box = await seal(key, config);
+  }
+  await update(db, name, () => box);
 }
 
-export async function loadCloud(db) {
-  const box = await read(db, 'cloud');
+export async function loadDeviceConfig(db, name) {
+  const box = await read(db, name);
   return box ? unseal(await read(db, 'device-key'), box) : null;
 }
 
@@ -119,7 +125,7 @@ export async function connect(config, request = fetch) {
     const { allowMissing = false, accept = 'application/vnd.github+json', body } = options;
     const response = await request(url + path, {
       method: body ? 'PUT' : 'GET', cache: 'no-store', redirect: 'error',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout?.(15_000),
       headers: {
         Accept: accept, Authorization: 'Bearer ' + config.token,
         'X-GitHub-Api-Version': '2022-11-28',

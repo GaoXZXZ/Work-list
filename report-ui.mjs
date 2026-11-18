@@ -1,9 +1,9 @@
-import { collectReport, movedDay, reportDraft, reportMaterialLimit, reportPeriod, reportUnits } from './reports.mjs';
+import { collectReport, deepseekModels, movedDay, reportDraft, reportMaterialLimit, reportPeriod, reportUnits } from './reports.mjs';
 
 const earliest = '1900-01-01';
 const reportEndpoint = './api/report-ai';
 
-export function initReports({ getTasks, today, notify }) {
+export function initReports({ getTasks, getDeepseek, today, notify }) {
   const $ = selector => document.querySelector(selector);
   const panel = $('#report-content');
   const anchorInput = $('#report-anchor');
@@ -13,6 +13,8 @@ export function initReports({ getTasks, today, notify }) {
   const aiForm = $('#report-ai-form');
   const material = $('#report-ai-material');
   const code = $('#report-ai-code');
+  const codeField = $('#report-ai-code-field');
+  const modelLabel = $('#report-ai-model');
   const generate = $('#report-ai-generate');
   const aiStatus = $('#report-ai-status');
   const aiPreview = $('#report-ai-preview');
@@ -144,15 +146,28 @@ export function initReports({ getTasks, today, notify }) {
     generate.disabled = true;
     material.readOnly = false;
     code.readOnly = false;
+    code.required = false;
+    codeField.hidden = true;
+    modelLabel.hidden = true;
     status('正在检查撰写服务…', true);
     aiDialog.showModal();
     try {
       const response = await fetch(reportEndpoint, { cache: 'no-store', redirect: 'error', signal: controller.signal });
-      const configured = response.ok && response.headers.get('Content-Type')?.includes('application/json') &&
-        (await response.json()).enabled === true;
+      const service = response.ok && response.headers.get('Content-Type')?.includes('application/json')
+        ? await response.json() : {};
       if (controller.signal.aborted) return;
-      generate.disabled = !configured;
-      status(configured ? '' : '此站点尚未启用 DeepSeek 服务，请参阅部署说明。');
+      aiTarget.deepseek = service.localConfig === true ? getDeepseek() : null;
+      const needsCode = !aiTarget.deepseek && service.enabled === true;
+      codeField.hidden = !needsCode;
+      code.required = needsCode;
+      if (aiTarget.deepseek) {
+        modelLabel.textContent = '撰写模型 · ' + deepseekModels[aiTarget.deepseek.model];
+        modelLabel.hidden = false;
+      }
+      generate.disabled = !aiTarget.deepseek && !needsCode;
+      status(generate.disabled ? (service.localConfig === true
+        ? '请先在「设置与同步 → DeepSeek 设置」中配置 API Key。'
+        : '此站点尚未启用 DeepSeek 服务，请参阅部署说明。') : '');
     } catch {
       if (!controller.signal.aborted) status('无法连接撰写服务。联网后可重新打开此窗口。');
     } finally {
@@ -167,6 +182,7 @@ export function initReports({ getTasks, today, notify }) {
     material.value = '';
     result.value = '';
     code.value = '';
+    aiTarget = undefined;
   });
 
   aiForm.addEventListener('submit', async event => {
@@ -175,9 +191,9 @@ export function initReports({ getTasks, today, notify }) {
     const source = material.value.trim();
     if (!source) return status('请填写用于撰写的素材。');
     if (source.length > reportMaterialLimit) return status('素材超过 10 万字符，请删减后重试。');
-    const token = code.value.trim();
+    const { deepseek, period } = aiTarget;
+    const token = deepseek?.apiKey || code.value.trim();
     if (!token) return status('请输入部署时设置的 AI 访问口令。');
-    const { period } = aiTarget;
     const controller = new AbortController();
     request = controller;
     generate.disabled = true;
@@ -187,7 +203,10 @@ export function initReports({ getTasks, today, notify }) {
     try {
       const response = await fetch(reportEndpoint, {
         method: 'POST', cache: 'no-store', redirect: 'error', signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        headers: {
+          'Content-Type': 'application/json', Authorization: 'Bearer ' + token,
+          ...(deepseek && { 'X-Work-List-Model': deepseek.model }),
+        },
         body: JSON.stringify({ kind: period.kind, start: period.start, end: period.end, source }),
       });
       if (!response.headers.get('Content-Type')?.includes('application/json')) throw Error('此站点尚未启用 DeepSeek 服务，请参阅部署说明。');
@@ -195,7 +214,7 @@ export function initReports({ getTasks, today, notify }) {
       if (!response.ok) throw Error(data.error || '未能生成草稿，请稍后重试。');
       if (typeof data.draft !== 'string' || !data.draft.trim()) throw Error('DeepSeek 返回了空白草稿，请重试。');
       if (controller.signal.aborted) return;
-      accessCode = token;
+      if (!deepseek) accessCode = token;
       result.value = data.draft;
       aiForm.hidden = true;
       aiPreview.hidden = false;
